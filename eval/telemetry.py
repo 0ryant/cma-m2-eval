@@ -237,7 +237,7 @@ class TelemetryEmitter:
         """
         tags = [e for e in self.event_log if isinstance(e, PrecedenceTagEvent)]
         if not tags:
-            return {"override": 0.0, "score_win": 0.0, "weighted_arb": 0.0, "total": 0, "strong_fraction": 0.0}
+            return {"override": 0.0, "score_win": 0.0, "weighted_arb": 0.0, "total": 0, "strong_fraction": 0.0, "tier_a_gate_pass": False}
         n = len(tags)
         n_override   = sum(1 for t in tags if t.event_tag == PrecedenceTag.OVERRIDE)
         n_score_win  = sum(1 for t in tags if t.event_tag == PrecedenceTag.SCORE_WIN)

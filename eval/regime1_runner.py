@@ -123,7 +123,7 @@ class ObservableSnapshot:
     pearson_r_char_stability: float = 0.0
 
     # Supplementary
-    cold_start_gate_passed:  bool  = False
+    cold_start_gate_passed:  Optional[bool] = None  # True=pass, False=fail, None=blocked
     mean_world_model_error_at_150: float = 1.0
     precedence_strong_fraction: float = 0.0
     depressive_lock_in_events:  int   = 0
@@ -201,9 +201,10 @@ def run_seed(
     buf:     StratifiedReplayBuffer,
     gate:    ColdStartDecayGate,
     rng:     random.Random,
-) -> Tuple[List[TickRecord], bool]:
+) -> Tuple[List[TickRecord], Optional[bool]]:
     """
-    Run all agents for one seed. Returns (all_records, gate_passed).
+    Run all agents for one seed. Returns (all_records, gate_result).
+    gate_result: True=pass, False=fail, None=blocked (run too short).
     """
     rd_sched = build_peacetime_schedule(cfg, seed)
     all_records: List[TickRecord] = []
@@ -261,8 +262,15 @@ def run_seed(
 
     # Check gate
     gate_passed, gate_msg = gate.check_regime_1_gate()
-    print(f"  Seed {seed} cold-start gate: {'PASS' if gate_passed else 'FAIL'} — {gate_msg}")
-    return all_records, gate_passed
+    gate_blocked = "not yet reached" in gate_msg or "cannot be evaluated" in gate_msg
+    if gate_blocked:
+        print(f"  Seed {seed} cold-start gate: BLOCKED — {gate_msg}")
+    else:
+        print(f"  Seed {seed} cold-start gate: {'PASS' if gate_passed else 'FAIL'} — {gate_msg}")
+    # Treat structurally impossible gate as None (blocked), not False (failed)
+    # None propagates through Regime1Result and does not block Regime 2
+    gate_result = None if gate_blocked else gate_passed
+    return all_records, gate_result
 
 
 # ──────────────────────────────────────────────────────────────
@@ -274,8 +282,8 @@ class Regime1Result:
     observables:        List[ObservableSnapshot]
     all_records:        List[TickRecord]
     telemetry:          TelemetryEmitter
-    gate_passed:        bool           # True if ALL seeds pass cold-start gate
-    regime2_unblocked:  bool           # same as gate_passed
+    gate_passed:        Optional[bool]  # True=all pass, False=any fail, None=blocked
+    regime2_unblocked:  bool           # True only if gate_passed is True
 
     def summary(self) -> str:
         lines = ["\n══ Regime 1 PEACETIME Arc ══════════════════════════════"]
@@ -294,7 +302,13 @@ class Regime1Result:
         lines.append(f"  Observable 5 — Character stability:  {mean('pearson_r_char_stability'):.4f}  (target ≥ 0.70)")
         lines.append(f"")
         lines.append(f"  Precedence strong frac: {mean('precedence_strong_fraction'):.3f}  (target > 0.70 for Tier A)")
-        lines.append(f"  Cold-start gate:        {'ALL PASS ✓' if self.gate_passed else 'FAIL ✗ — fix replay buffer before Regime 2'}")
+        if self.gate_passed is None:
+            gate_str = "BLOCKED — run too short (ticks < 150)"
+        elif self.gate_passed:
+            gate_str = "ALL PASS ✓"
+        else:
+            gate_str = "FAIL ✗ — fix replay buffer before Regime 2"
+        lines.append(f"  Cold-start gate:        {gate_str}")
         lines.append(f"  Regime 2 unblocked:     {'YES' if self.regime2_unblocked else 'NO'}")
         return "\n".join(lines)
 
@@ -323,17 +337,21 @@ def run_regime1(
     all_records:    List[TickRecord]        = []
     snapshots:      List[ObservableSnapshot] = []
     episode_groups: Dict[int, List[List[TickRecord]]] = {}   # seed → per-agent episodes
-    all_gates_pass  = True
+    any_gate_failed  = False
+    any_gate_blocked = False
 
     for seed_offset in range(cfg.num_seeds):
         seed = seed_base + seed_offset
         print(f"\n── Regime 1 seed {seed} ─────────────────────────────")
         records, gate_ok = run_seed(m2_agents, cfg, seed, tel, buf, gate, rng)
         all_records.extend(records)
-        if not gate_ok:
-            all_gates_pass = False
+        if gate_ok is False:
+            any_gate_failed = True
             print(f"  ⚠  Gate failed for seed {seed}. Calling double_peacetime_fraction().")
             buf.double_peacetime_fraction()
+        elif gate_ok is None:
+            any_gate_blocked = True
+            print(f"  ⚠  Gate blocked for seed {seed} (run too short). Not a failure.")
 
         # Build per-agent episode lists for character stability
         by_agent: Dict[str, List[TickRecord]] = {}
@@ -361,12 +379,20 @@ def run_regime1(
         print(f"  CV(tactic): {snap.cv_tactic_class:.4f}  Spearman: {snap.spearman_collapse_rho:.4f}  "
               f"Pearson r: {snap.pearson_r_char_stability:.4f}")
 
+    # Derive three-state gate: True (all pass), False (any fail), None (all blocked, none failed)
+    if any_gate_failed:
+        gate_result = False
+    elif any_gate_blocked:
+        gate_result = None
+    else:
+        gate_result = True
+
     result = Regime1Result(
         observables=snapshots,
         all_records=all_records,
         telemetry=tel,
-        gate_passed=all_gates_pass,
-        regime2_unblocked=all_gates_pass,
+        gate_passed=gate_result,
+        regime2_unblocked=gate_result is True,
     )
     print(result.summary())
     return result

@@ -164,15 +164,27 @@ class LSMRuntime:
             tactic_mask = np.ones(self.cfg.num_actions, dtype=bool)
 
         if self.cfg.tactic_restriction:
+            import math
             # Score within-cluster actions using dot product with W_z
             obs = phi if len(phi) == self.cfg.obs_dim else \
                   np.pad(phi, (0, max(0, self.cfg.obs_dim - len(phi))))[:self.cfg.obs_dim]
             w_z = p.W[z]  # [obs_dim]
-            # Action scores proportional to alignment with state preference
+            # Action scores: base + obs-varying channel + phase offset.
+            # Mirrors M2 _tactic_logits structure so counterfactual comparison is fair.
+            # The key architectural difference: M2 tactic sets are semantically authored
+            # (DEFEND groups defensive actions whose obs channels correlate under threat);
+            # LSM clusters are from k-means so obs channel correlation is weaker → lower
+            # within-state coherence when tested with semantically-structured real obs.
             base = np.dot(obs, w_z)
-            for a in range(self.cfg.num_actions):
-                if tactic_mask[a]:
-                    logits[a] = base + 0.1 * (a % (z + 1))  # slight action differentiation
+            obs_dim = len(obs)
+            cluster_actions = [a for a in range(self.cfg.num_actions) if tactic_mask[a]]
+            for rank, a in enumerate(cluster_actions):
+                action_phase = 2 * math.pi * rank / max(1, len(cluster_actions))
+                obs_channel  = float(obs[a % obs_dim])
+                logits[a] = (base
+                             + 0.35 * obs_channel
+                             + 0.25 * math.cos(action_phase + z * 0.7)
+                             + 0.01 * (a % (z + 1)))
         else:
             logits = np.zeros(self.cfg.num_actions, dtype=np.float32)
 

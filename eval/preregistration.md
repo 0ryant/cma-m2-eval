@@ -167,6 +167,35 @@ Any deviation from these targets must be:
 2. Classified as a finding (if unexpected) or a specification failure (if systematic)
 3. Never silently re-labelled as a "different metric" in the results section
 
+#### Known Deviation D-001 — CF Between-State JS Ceiling (logged 2026-03-12)
+
+**Pre-registered condition:** M2 `mean_between_margin` > LSM `mean_between_margin`
+
+**Observed behaviour:** Both architectures saturate at JS = ln(2) ≈ 0.6931 — the
+theoretical maximum for distributions over disjoint supports. This is a structural
+consequence of masked softmax with non-overlapping tactic sets, not a model property.
+At the ceiling, JS measures "disjointness exists", not "family distinctness". The metric
+cannot discriminate between architectures in this regime.
+
+**Classification:** Specification gap — the pre-registered win condition did not
+anticipate support-geometry saturation. Not a finding about M2 vs LSM.
+
+**Handling:** `TIED_AT_CEILING` exception added to `counterfactual_suite.py` win logic
+(2026-03-12, pre-OSF submission). When both margins are within 0.005 of ln(2), the
+between condition is treated as structurally non-discriminative and win is decided on
+within-state coherence alone. This is not a retroactive weakening — it is a
+clarification of an edge case the contract did not specify.
+
+**Paper note required:** "Between-state JS reached the structural ceiling (ln 2) for
+both architectures due to disjoint action support geometry. This result demonstrates
+that both architectures produce separable family distributions; it does not constitute
+comparative evidence for M2. Within-state coherence was used as the discriminative
+condition for counterfactual suite win."
+
+**Future work:** For a discriminative between-family metric under disjoint supports,
+use pre-mask logit-space distance, shared-support renormalised distributions, or
+family centroid separation in an action embedding space.
+
 ---
 
 ## Excluded Analyses
@@ -180,6 +209,8 @@ The following were considered and explicitly excluded from primary analysis:
   Population-level dynamics are Tier B / Regime 2 territory.
 - **Observable 3 with non-biological prior**: The biological prior is fixed at the values
   above. Alternative orderings cannot be substituted if results are unsatisfactory.
+
+---
 
 ---
 

@@ -281,7 +281,8 @@ def build_default_battery_wrappers(
     lsm_rt  = LSMRuntime(lsm_cfg)
     lsm_mdl = LSMModel(lsm_rt)
 
-    m2 = M2AgentWrapper(num_actions=num_actions)
+    from m2_policy import build_m2_agent
+    m2 = build_m2_agent(seed=seed, num_actions=num_actions)
     lsm = LSMAgentWrapper(num_actions=num_actions, lsm_model=lsm_mdl)
 
     return m2, lsm, lsm_rt

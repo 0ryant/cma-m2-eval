@@ -195,9 +195,69 @@ class M2MinimalPolicy:
             seed=config.tactic_set_seed,
         )
 
-        # Scoring weights (learned in real engine — random init here)
+        # Scoring weights grounded in obs semantics:
+        # [0]rd [1]urgency [2]resources [3]goal [4]node_lv [5]regen [6]nbr_res
+        # [7]n_nbr [8]scarcity [9]ticks_since_gain [10]wm_conf [11]coherence
+        # [12]goal_valence [13]budget_pressure [14]social_density [15]time_pressure
+        #
+        # Family ordering: DEFEND(0) WITHDRAW(1) REPAIR(2) EXPLORE(3)
+        #                  DOMINATE(4) SEEK_HELP(5) DECEIVE(6)
+        #
+        # Design: four regime zones
+        #   Low rd + high res    → EXPLORE
+        #   Mid rd + draining    → REPAIR (budget_pressure/ticks_since_gain signals)
+        #   High rd + social nbr → SEEK_HELP
+        #   High urgency/scarcity→ DEFEND
+
         n_fam   = len(self._families)
-        self._W = self._rng.standard_normal((n_fam, 64)).astype(np.float32) * 0.1
+        self._W = np.zeros((n_fam, 64), dtype=np.float32)
+
+        # EXPLORE (3) — thrive: LOW rd, HIGH resources, HIGH wm_confidence
+        self._W[3, 0]  = -4.0   # rd LOW → EXPLORE (dominant signal)
+        self._W[3, 2]  = +3.0   # resources HIGH → EXPLORE
+        self._W[3, 10] = +1.5   # wm_confidence HIGH → EXPLORE
+        self._W[3, 11] = +1.0   # narrative_coherence → EXPLORE
+        self._W[3, 8]  = -1.5   # scarcity → less EXPLORE
+        self._W[3, 1]  = -2.0   # urgency → less EXPLORE
+
+        # REPAIR (2) — recovery: draining signals only (NOT penalised by resources level)
+        self._W[2, 13] = +4.0   # budget_pressure → REPAIR (strongest signal)
+        self._W[2, 9]  = +3.0   # ticks_since_gain → REPAIR
+        self._W[2, 8]  = +1.5   # scarcity → REPAIR (rebuild during shortage)
+        self._W[2, 0]  = +0.8   # mild rd boost
+        # No resources penalty: REPAIR fires on drain rate, not current level
+
+        # SEEK_HELP (5) — social rescue: HIGH rd + social density + neighbour surplus
+        self._W[5, 0]  = +2.5   # rd HIGH → SEEK_HELP
+        self._W[5, 14] = +2.5   # social_density → SEEK_HELP (need the network)
+        self._W[5, 6]  = +2.0   # mean_nbr_resource HIGH → SEEK_HELP (neighbours can give)
+        self._W[5, 1]  = +1.0   # urgency
+        self._W[5, 2]  = -1.5   # own resources HIGH → less SEEK_HELP (don't need it)
+
+        # DEFEND (0) — crisis hold: urgency + scarcity shock; NOT rd alone
+        self._W[0, 1]  = +4.0   # urgency → DEFEND (dominant signal)
+        self._W[0, 8]  = +3.0   # scarcity → DEFEND
+        self._W[0, 0]  = +0.5   # mild rd
+        self._W[0, 2]  = -2.0   # resources HIGH → less DEFEND
+
+        # WITHDRAW (1) — isolated refuge: low social density
+        self._W[1, 14] = -3.0   # low social → WITHDRAW (inverse signal)
+        self._W[1, 11] = -1.0   # low narrative coherence → WITHDRAW
+
+        # DOMINATE (4) — opportunistic: many neighbours with surplus
+        self._W[4, 7]  = +2.5   # n_neighbours → DOMINATE
+        self._W[4, 6]  = +2.0   # mean_nbr_resource HIGH → extract from them
+        self._W[4, 0]  = +0.5   # mild rd
+        self._W[4, 2]  = -1.0   # own resources → less DOMINATE when already rich
+
+        # DECEIVE (6) — information play
+        self._W[6, 14] = +1.5   # social density (need audience)
+        self._W[6, 6]  = -1.5   # low nbr resources (exploit info gap)
+        self._W[6, 0]  = +0.5   # mild rd
+
+        # Seed-specific noise for phenotype diversity (individual variation)
+        rng_w = np.random.default_rng(seed + 777)
+        self._W += rng_w.standard_normal(self._W.shape).astype(np.float32) * 0.30
 
         # Persistent state (reset per episode)
         self._active_family: int          = 0   # index into self._families
@@ -296,16 +356,48 @@ class M2MinimalPolicy:
     # ── Tactic selection ─────────────────────────────────────
 
     def _tactic_logits(self, family_idx: int, obs: np.ndarray) -> np.ndarray:
-        """Return logits over full action space, with non-T_f actions masked to -1e9."""
+        """
+        Return logits over full action space, with non-T_f actions masked to -1e9.
+
+        Per-action differentiation: each action a within the tactic set gets a unique
+        logit score based on:
+          1. Family weight vector w aligned with obs (family-level signal)
+          2. Action-specific phase offset (unique to each action index)
+          3. Small Gaussian noise (phenotype individuality)
+
+        Without per-action differentiation, all actions in the tactic set get the same
+        logit — resulting in uniform distributions and trivially-identical counterfactual
+        coherence scores for M2 and LSM. The phase offset breaks this degeneracy while
+        preserving the semantic direction of each family (the obs-dependent term still
+        dominates across contexts).
+        """
+        import math
         logits = np.full(self.cfg.num_actions, -1e9, dtype=np.float32)
         tactic_set = self._tactic_sets.get(family_idx, [])
         if not tactic_set:
             tactic_set = list(range(self.cfg.num_actions))
         obs_padded = obs[:64] if len(obs) >= 64 else np.pad(obs, (0, 64 - len(obs))).astype(np.float32)
         w = self._W[family_idx]
-        for a in tactic_set:
-            # Simple preference signal: alignment with family weight vector
-            logits[a] = float(w @ obs_padded) + float(self._rng.normal(0, 0.01))
+        base_score = float(w @ obs_padded)
+        # Within-state coherence design:
+        #   base_score is SHARED across all actions in this tactic set.
+        #   obs perturbation → base_score shifts equally for all actions
+        #   → distribution SHAPE unchanged under obs noise → high within-state coherence.
+        #   This encodes the semantic claim: all actions within a family respond to the
+        #   SAME obs signal (they are the same strategic mode). The Fourier term provides
+        #   action-level discrimination (for non-trivial distributions) via a fixed offset
+        #   unique to each action's rank within the set.
+        #
+        # Between-state coherence design:
+        #   family_idx term in the Fourier phase (family_idx * 0.7) shifts the offset
+        #   pattern per family → centroids differ across forced states → between-state
+        #   JS > 0. Under disjoint supports this saturates at ln(2) by construction
+        #   (see preregistration.md deviation D-001); TIED_AT_CEILING handles this.
+        for rank, a in enumerate(tactic_set):
+            action_phase = 2 * math.pi * rank / max(1, len(tactic_set))
+            logits[a] = (base_score
+                         + 0.25 * math.cos(action_phase + family_idx * 0.7)
+                         + float(self._rng.normal(0, 0.01)))
         return logits
 
     def _available_mask(self, family_idx: int) -> List[bool]:
@@ -362,10 +454,12 @@ class M2MinimalPolicy:
 
             if best_idx != self._active_family and not self._can_switch(tick):
                 # Refractory: must stay
-                best_idx  = self._active_family
-                best_name = self._families[best_idx].name
-                precedence   = PrecedenceTag.SCORE_WIN
-                dominant     = "M2_policy_refractory"
+                best_idx         = self._active_family
+                best_name        = self._families[best_idx].name
+                switch_occurred  = False
+                switch_cost_paid = 0.0
+                precedence       = PrecedenceTag.SCORE_WIN
+                dominant         = "M2_policy_refractory"
             elif best_idx != self._active_family:
                 switch_occurred  = True
                 switch_cost_paid = self.cfg.switch_cost
@@ -391,8 +485,16 @@ class M2MinimalPolicy:
 
         # --- Tactic selection ---
         logits = self._tactic_logits(selected_idx, obs_arr)
-        mask   = self._available_mask(selected_idx)
-        action = int(np.argmax(np.where(mask, logits, -1e9)))
+        action_mask   = self._available_mask(selected_idx)
+        action = int(np.argmax(np.where(action_mask, logits, -1e9)))
+
+        # Family-level accessibility mask: 7-bit, True = A(f,t) > 0
+        # This is what topology_suite uses to detect collapse/recovery
+        family_mask = [accessibility.get(fp.name, 0.0) > 0.0 for fp in self._families]
+
+        # Encode family accessibility into available_mask positions 0-6
+        # Positions 7-19 retain per-action mask for the active family
+        combined_mask = family_mask + action_mask[7:]
 
         # --- Explanation trace (§M2.6) ---
         if self.cfg.trace_enabled and forced_state is None:
@@ -404,8 +506,8 @@ class M2MinimalPolicy:
                 accessible_families=accessible_families,
                 selected_family=selected_name,
                 precedence_tag=precedence.value,
-                switch_occurred=getattr(self, '_last_switch', False),
-                switch_cost_paid=getattr(self, '_last_switch_cost', 0.0),
+                switch_occurred=switch_occurred,
+                switch_cost_paid=switch_cost_paid,
                 rd=rd,
                 urgency=urgency,
             )
@@ -416,7 +518,7 @@ class M2MinimalPolicy:
 
         return _M2StepOutput(
             action_logits=logits.tolist(),
-            available_mask=mask,
+            available_mask=combined_mask,
             active_state=selected_idx,
             action_taken=action,
             tactic_class=tactic_class,

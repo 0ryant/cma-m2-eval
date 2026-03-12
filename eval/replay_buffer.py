@@ -174,9 +174,13 @@ class StratifiedReplayBuffer:
         new_fraction = min(0.60, self.min_peacetime_fraction * 2)
         print(f"[ReplayBuffer] Doubling PEACETIME fraction: {self.min_peacetime_fraction:.0%} → {new_fraction:.0%}")
         self.min_peacetime_fraction = new_fraction
-        # Rebuild capacity allocation
-        self._peacetime_capacity = max(10, int(self.capacity * new_fraction * 2))
-        self._other_capacity = self.capacity - self._peacetime_capacity
+        # Rebuild capacity allocation — clamp so peacetime never exceeds total
+        self._peacetime_capacity = min(self.capacity, max(10, int(self.capacity * new_fraction * 2)))
+        self._other_capacity = max(0, self.capacity - self._peacetime_capacity)
+        # Update deque maxlen to match new capacity — without this the deque
+        # retains its original maxlen and silently ignores the new allocation.
+        self._peacetime = deque(self._peacetime, maxlen=self._peacetime_capacity)
+        self._other     = deque(self._other,     maxlen=self._other_capacity if self._other_capacity > 0 else 1)
         # Prune other pool if needed
         while len(self._other) > self._other_capacity:
             self._other.popleft()

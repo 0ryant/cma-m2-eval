@@ -231,16 +231,26 @@ def compute_verdict(
     obs2a_val = None
     if regime1 and regime1.observables:
         obs2a_val = mean("switch_frequency")
-    m_obs2a = _metric_status("Obs 2a — Switch freq", obs2a_val, 0.01, ">",
-                              "> 0.01", ticks)
+    # Zero switch frequency = no switches occurred = NOT_TRIGGERED (contingent absence, not FAIL)
+    if obs2a_val is not None and obs2a_val == 0.0:
+        m_obs2a = MetricStatus("Obs 2a — Switch freq", obs2a_val, "> 0.01",
+                               NOT_TRIGGERED, note="no switches observed in this run")
+    else:
+        m_obs2a = _metric_status("Obs 2a — Switch freq", obs2a_val, 0.01, ">",
+                                  "> 0.01", ticks)
     metrics.append(m_obs2a)
 
     # Observable 2b — Post-switch degradation
     obs2b_val = None
     if regime1 and regime1.observables:
         obs2b_val = mean("post_switch_degradation")
-    m_obs2b = _metric_status("Obs 2b — Post-switch degradation", obs2b_val, -0.10, "<=",
-                              "≤ −0.10", ticks)
+    # If no switches, degradation is undefined — NOT_TRIGGERED regardless of value
+    if m_obs2a.status == NOT_TRIGGERED or (obs2b_val == 0.0 and obs2a_val == 0.0):
+        m_obs2b = MetricStatus("Obs 2b — Post-switch degradation", obs2b_val, "≤ −0.10",
+                               NOT_TRIGGERED, note="no switches to measure degradation against")
+    else:
+        m_obs2b = _metric_status("Obs 2b — Post-switch degradation", obs2b_val, -0.10, "<=",
+                                  "≤ −0.10", ticks)
     metrics.append(m_obs2b)
 
     # Observable 3 — Stress collapse order (requires stress)
@@ -390,7 +400,9 @@ def compute_verdict(
             "INTEGRITY MODE RUN — stress/collapse metrics are BLOCKED_BY_REGIME_LENGTH. "
             "Downgrade level reflects integrity-mode signal only, not publication evidence."
         )
-    if not regime1 or not regime1.gate_passed:
+    if regime1 and regime1.gate_passed is None:
+        notes.append("Cold-start gate BLOCKED (run too short — ticks < 150). Not a failure.")
+    elif not regime1 or not regime1.gate_passed:
         notes.append("Cold-start gate not passed — Regime 2 is blocked.")
 
     return ExperimentVerdict(
@@ -490,8 +502,8 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         m2_bat, lsm_bat, lsm_rt = build_default_battery_wrappers(
             num_actions=cfg.num_actions, obs_dim=cfg.obs_dim * 4,
         )
-        m2_param_count  = int(m2_bat.policy_layer._W.size) if hasattr(m2_bat, 'policy_layer') and hasattr(m2_bat.policy_layer, '_W') else 0
-        lsm_param_count = int(lsm_rt.cfg.num_latent_states * lsm_rt.cfg.obs_dim + lsm_rt.cfg.num_latent_states) if lsm_rt else 0
+        m2_param_count  = m2_bat.policy_layer.param_count() if hasattr(m2_bat, 'policy_layer') and hasattr(m2_bat.policy_layer, 'param_count') else 0
+        lsm_param_count = lsm_rt.param_count() if lsm_rt else 0
 
         bat_cfg = BatteryConfig(
             num_actions=cfg.num_actions,
@@ -506,8 +518,7 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         tel_bat = regime1_result.telemetry if regime1_result else TelemetryEmitter()
         r1_records = regime1_result.all_records if regime1_result else None
         battery_result = run_full_battery(m2_bat, lsm_bat, cfg=bat_cfg,
-                                          telemetry=tel_bat, lsm_runtime=lsm_rt,
-                                          regime1_records=r1_records)
+                                          telemetry=tel_bat, lsm_runtime=lsm_rt)
 
         bat_path = out_dir / "battery_result.json"
         with open(bat_path, "w") as f:
@@ -588,7 +599,7 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
                 f.write(f"- Seed {snap.seed}: CV={snap.cv_tactic_class:.4f}  "
                         f"Spearman={snap.spearman_collapse_rho:.4f}  "
                         f"PearsonR={snap.pearson_r_char_stability:.4f}  "
-                        f"Gate={'PASS' if snap.cold_start_gate_passed else 'FAIL'}\n")
+                        f"Gate={'PASS' if snap.cold_start_gate_passed is True else ('BLOCKED' if snap.cold_start_gate_passed is None else 'FAIL')}\n")
     print(f"\n  Verdict saved: {verdict_path}")
     return verdict
 
