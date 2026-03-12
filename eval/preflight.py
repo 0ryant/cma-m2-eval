@@ -104,6 +104,7 @@ def check_narrative_gate() -> CheckResult:
 def check_causal_graph() -> CheckResult:
     paths = [
         Path(__file__).parent / "causal_graph.md",
+        Path(__file__).parent.parent / "docs" / "causal_graph.md",
         Path("/mnt/user-data/outputs/causal_graph.md"),
         Path("docs/causal_graph.md"),
     ]
@@ -116,9 +117,8 @@ def check_causal_graph() -> CheckResult:
             has_stub_ok  = "STUB — wire before Regime 2" in content or "STUB" in content
             if has_wired:
                 return CheckResult("Causal graph committed", True, f"Found at {p}")
-        return CheckResult("Causal graph committed", False,
-                           "causal_graph.md not found. Commit to docs/ before Regime 1.")
-    return CheckResult("Causal graph committed", False, "causal_graph.md not found")
+    return CheckResult("Causal graph committed", False,
+                       "causal_graph.md not found. Commit to docs/ before Regime 1.")
 
 
 def check_observation_substrate() -> CheckResult:
