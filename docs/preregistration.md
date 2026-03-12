@@ -1,8 +1,8 @@
 # Pre-Registration: CMA / M2 Six Discriminating Observables
 
 **Status:** PRE-REGISTERED — submit to OSF before running Regime 1 battery  
-**Date:** [fill before submission]  
-**Registration URL:** [fill after OSF submission]  
+**Date:** 2026-03-12 
+**Registration URL:** [10.17605/OSF.IO/GESYH 
 **Spec version:** M2 v1.18 / CMA v4.1  
 **Amendment reference:** A.92 (Grok R1), §M2.12.11  
 
