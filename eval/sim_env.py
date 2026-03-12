@@ -110,15 +110,15 @@ class WorldModel:
         self.W   = rng.standard_normal(3).astype(np.float64) * 0.01
         self.b   = 0.0
         self.lr  = lr
-        self.resource_scale = resource_scale
+        self.resource_scale = resource_scale   # normalisation divisor
         self._error_history: deque = deque(maxlen=50)
         self._error_history.extend([init_error] * 50)
 
     def _normalise(self, r_t: float, action_gain: float, scarcity: float) -> np.ndarray:
         return np.array([
-            r_t / self.resource_scale,
-            action_gain / (self.resource_scale * 0.05 + 1e-8),
-            scarcity,
+            r_t / self.resource_scale,       # resources normalised to ~[0,2]
+            action_gain / (self.resource_scale * 0.05 + 1e-8),  # gain normalised
+            scarcity,                         # already [0,1]
         ], dtype=np.float64)
 
     def predict(self, r_t: float, action_gain: float, scarcity: float) -> float:
@@ -127,14 +127,16 @@ class WorldModel:
 
     def update(self, r_t: float, action_gain: float, scarcity: float, r_actual: float) -> float:
         pred  = self.predict(r_t, action_gain, scarcity)
-        error = (r_actual - pred) / self.resource_scale
+        error = (r_actual - pred) / self.resource_scale   # normalised error signal
         x     = self._normalise(r_t, action_gain, scarcity)
         grad  = error * x
+        # Clip gradient magnitude to prevent explosion
         grad_norm = np.linalg.norm(grad)
         if grad_norm > 1.0:
             grad = grad / grad_norm
         self.W += self.lr * grad
         self.b += self.lr * error * 0.1
+        # Fractional prediction error for gate tracking
         frac_error = min(1.0, abs(r_actual - pred) / (self.resource_scale + 1e-8))
         self._error_history.append(frac_error)
         return frac_error
@@ -158,9 +160,11 @@ class GoalStack:
         self._priorities.extend([1.0] * window)
 
     def update(self, goal_progress: float) -> float:
+        # Priority inversely proportional to progress (more urgent when further from goal)
         priority = max(0.1, 1.0 - goal_progress)
         self._priorities.append(priority)
         variance = float(np.var(list(self._priorities)))
+        # Max possible variance for [0,1] range is 0.25
         coherence = max(0.0, 1.0 - variance / 0.25)
         return coherence
 
@@ -177,28 +181,31 @@ class GoalStack:
 class AgentState:
     agent_id:          str
     resources:         float
-    resource_node:     int
-    neighbours:        List[int]
+    resource_node:     int          # which node this agent is at
+    neighbours:        List[int]    # neighbour agent indices
     world_model:       WorldModel
     goal_stack:        GoalStack
     rd_history:        deque = field(default_factory=lambda: deque([0.0] * 5, maxlen=5))
     ticks_since_gain:  int   = 0
     last_resource:     float = 20.0
-    visible:           bool  = True
+    visible:           bool  = True   # WITHDRAW reduces this
 
     def regression_depth(self, goal: float) -> float:
         return max(0.0, (goal - self.resources) / goal)
 
     def urgency(self) -> float:
+        """5-tick rate of rd increase. Positive = getting worse."""
         hist = list(self.rd_history)
         if len(hist) < 2:
             return 0.0
         return max(0.0, hist[-1] - hist[0]) / len(hist)
 
     def budget_pressure(self, resource_decay: float = 0.70) -> float:
+        """Resource drain rate this tick, normalised by max expected drain."""
         drain = self.last_resource - self.resources
         if drain <= 0:
             return 0.0
+        # Normalise by total decay budget: if draining more than decay→harvest covers, pressure=1
         return min(1.0, drain / (resource_decay + 1e-8))
 
 
@@ -229,14 +236,14 @@ class ResourceNode:
 
 TACTIC_GAINS = {
     # (base_harvest_mult, transfer_recv_mult, transfer_send_mult, visibility)
-    "DEFEND":    (0.60, 0.50, 0.10, 1.0),
-    "WITHDRAW":  (0.80, 0.20, 0.20, 0.30),
-    "REPAIR":    (1.30, 0.40, 0.10, 0.80),
-    "EXPLORE":   (0.70, 0.60, 0.30, 1.0),
-    "DOMINATE":  (0.50, 0.00, 0.80, 1.2),
-    "SEEK_HELP": (0.40, 1.20, 0.10, 1.1),
-    "DECEIVE":   (0.90, 0.70, 0.05, 0.90),
-    "BASELINE":  (0.50, 0.40, 0.20, 1.0),
+    "DEFEND":    (0.60, 0.50, 0.10, 1.0),   # protects, reduces incoming extraction
+    "WITHDRAW":  (0.80, 0.20, 0.20, 0.30),  # forages alone, low social
+    "REPAIR":    (1.30, 0.40, 0.10, 0.80),  # strong self-maintenance
+    "EXPLORE":   (0.70, 0.60, 0.30, 1.0),   # samples new nodes
+    "DOMINATE":  (0.50, 0.00, 0.80, 1.2),   # extraction from others (sends out, takes back)
+    "SEEK_HELP": (0.40, 1.20, 0.10, 1.1),   # receives transfers from neighbours
+    "DECEIVE":   (0.90, 0.70, 0.05, 0.90),  # signals false levels; moderate gains
+    "BASELINE":  (0.50, 0.40, 0.20, 1.0),   # no strategic type
 }
 
 
@@ -261,12 +268,14 @@ def scarcity_at(tick: int, cfg: EnvConfig) -> float:
 
 def build_social_graph(n: int, k: int, p: float, rng: random.Random) -> Dict[int, List[int]]:
     """Returns adjacency list (undirected)."""
+    # Ring lattice
     adj: Dict[int, set] = {i: set() for i in range(n)}
     for i in range(n):
         for j in range(1, k // 2 + 1):
             nbr = (i + j) % n
             adj[i].add(nbr)
             adj[nbr].add(i)
+    # Rewire
     for i in range(n):
         for j in list(range(1, k // 2 + 1)):
             if rng.random() < p:
@@ -319,8 +328,10 @@ class SimEnv:
         self._scarcity = 1.0
         self._last_action_gains = {}
 
+        # Build social graph
         self._graph = build_social_graph(cfg.n_agents, cfg.graph_k, cfg.graph_p, self._rng_py)
 
+        # Build resource nodes
         self._nodes = [
             ResourceNode(
                 node_id=i,
@@ -330,6 +341,7 @@ class SimEnv:
             for i in range(cfg.n_resource_nodes)
         ]
 
+        # Build agents
         self._agents = []
         for i in range(cfg.n_agents):
             agent_id = f"agent_{i}"
@@ -349,7 +361,7 @@ class SimEnv:
 
     def step(
         self,
-        action_dict: Dict[str, str],
+        action_dict: Dict[str, str],   # {agent_id: tactic_family_name}
     ) -> Tuple[Dict[str, List[float]], bool]:
         """
         Advance one tick. Returns (obs_dict, done).
@@ -358,11 +370,13 @@ class SimEnv:
         self._tick += 1
         self._scarcity = scarcity_at(self._tick, self.cfg)
 
+        # Tick resource nodes
         for node in self._nodes:
             node.tick(self._scarcity)
 
         agent_by_id = {ag.agent_id: ag for ag in self._agents}
 
+        # Compute action gains per agent
         new_resources: Dict[str, float] = {}
         action_gain_map: Dict[str, float] = {}
 
@@ -371,17 +385,21 @@ class SimEnv:
             gains  = TACTIC_GAINS.get(tactic, TACTIC_GAINS["BASELINE"])
             harvest_mult, recv_mult, send_mult, visibility = gains
 
+            # Visibility update (WITHDRAW hides the agent)
             ag.visible = self._rng_py.random() < visibility
 
+            # Harvest from resource node
             node  = self._nodes[ag.resource_node]
             harvest_want = self.cfg.node_regen_base * harvest_mult * self._scarcity
             harvest_got  = node.harvest(harvest_want)
 
+            # EXPLORE: sometimes move to a better node
             if tactic == "EXPLORE" and self._rng_py.random() < 0.25:
                 best_node = max(range(self.cfg.n_resource_nodes),
                                 key=lambda n: self._nodes[n].level)
                 ag.resource_node = best_node
 
+            # DOMINATE: take from visible neighbours
             stolen = 0.0
             if tactic == "DOMINATE":
                 for nbr_idx in ag.neighbours:
@@ -394,6 +412,7 @@ class SimEnv:
             new_resources[ag.agent_id] = ag.resources + harvest_got + stolen
             action_gain_map[ag.agent_id] = harvest_got + stolen
 
+        # SEEK_HELP: redistribute from willing senders
         for ag in self._agents:
             tactic = action_dict.get(ag.agent_id, "BASELINE")
             if tactic == "SEEK_HELP":
@@ -408,13 +427,16 @@ class SimEnv:
                         new_resources[nbr.agent_id] = new_resources.get(nbr.agent_id, nbr.resources) - transfer
                         action_gain_map[ag.agent_id] = action_gain_map.get(ag.agent_id, 0) + transfer
 
+        # Commit resource updates + world model learning
         for ag in self._agents:
             prev = ag.resources
             ag.last_resource = prev
             r_new = max(0.0, new_resources.get(ag.agent_id, prev))
 
+            # Maintenance cost: resources decay each tick (forces continuous harvesting)
             r_new = max(0.0, r_new - self.cfg.resource_decay)
 
+            # Stress shock: direct resource drain during scarcity events
             if self._scarcity < 0.8:
                 shock_intensity = 1.0 - self._scarcity
                 r_new = max(0.0, r_new - self.cfg.stress_shock_drain * shock_intensity)
@@ -422,16 +444,20 @@ class SimEnv:
             tactic  = action_dict.get(ag.agent_id, "BASELINE")
             ag_gain = action_gain_map.get(ag.agent_id, 0.0)
 
+            # World model update: normalise error by scale of current resources
             norm_scale = max(abs(r_new), abs(prev), 1.0)
             pred   = ag.world_model.predict(prev, ag_gain, self._scarcity)
             wm_err = ag.world_model.update(prev, ag_gain, self._scarcity, r_new)
 
+            # Commit
             ag.resources = r_new
             ag.ticks_since_gain = 0 if r_new > prev else ag.ticks_since_gain + 1
 
+            # rd + urgency history
             rd = ag.regression_depth(self.cfg.resource_goal)
             ag.rd_history.append(rd)
 
+            # Goal stack / narrative coherence
             goal_progress = ag.resources / self.cfg.resource_goal
             ag.goal_stack.update(goal_progress)
 
@@ -487,21 +513,21 @@ class SimEnv:
         idx   = self._agents.index(ag)
 
         obs = [
-            rd,
-            ag.urgency(),
-            min(1.0, ag.resources / cfg.resource_goal),
-            1.0,
-            min(1.0, node.level / node.capacity),
-            node.regen / (cfg.node_regen_base * 1.5 + 1e-8),
-            min(1.0, np.mean([n.resources for n in nbrs]) / cfg.resource_goal) if nbrs else 0.5,
-            len(nbrs) / max(1, cfg.graph_k * 2),
-            1.0 - self._scarcity,
-            min(1.0, ag.ticks_since_gain / 20.0),
-            max(0.0, 1.0 - ag.world_model.error),
-            ag.goal_stack.update(ag.resources / cfg.resource_goal),
-            ag.goal_stack.primary_goal_valence,
-            ag.budget_pressure(self.cfg.resource_decay),
-            self.social_density(idx),
-            max(0.0, 1.0 - self._tick / cfg.ticks_per_episode),
+            rd,                                                                 # 0 rd
+            ag.urgency(),                                                       # 1 urgency
+            min(1.0, ag.resources / cfg.resource_goal),                         # 2 own_resources norm
+            1.0,                                                                # 3 goal_target (always 1.0)
+            min(1.0, node.level / node.capacity),                               # 4 resource_node_level
+            node.regen / (cfg.node_regen_base * 1.5 + 1e-8),                   # 5 regen_rate norm
+            min(1.0, np.mean([n.resources for n in nbrs]) / cfg.resource_goal) if nbrs else 0.5,  # 6 mean_nbr_resource
+            len(nbrs) / max(1, cfg.graph_k * 2),                               # 7 n_neighbours norm
+            1.0 - self._scarcity,                                               # 8 scarcity_level
+            min(1.0, ag.ticks_since_gain / 20.0),                               # 9 ticks_since_gain norm
+            max(0.0, 1.0 - ag.world_model.error),                              # 10 wm_confidence
+            ag.goal_stack.update(ag.resources / cfg.resource_goal),            # 11 narrative_coherence
+            ag.goal_stack.primary_goal_valence,                                # 12 primary_goal_valence
+            ag.budget_pressure(self.cfg.resource_decay),                                               # 13 budget_pressure
+            self.social_density(idx),                                           # 14 social_density
+            max(0.0, 1.0 - self._tick / cfg.ticks_per_episode),                # 15 time_pressure
         ]
         return [float(x) for x in obs]

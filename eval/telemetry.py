@@ -106,6 +106,10 @@ class TickRecord:
     # Goal
     primary_goal_valence:   float        # -1.0 to +1.0
 
+    # Raw observation vector — stored for CF probe contexts in LSM battery (P2.4)
+    # Optional: None in quick/smoke mode to save memory; set in publication runs.
+    obs_raw:                Optional[List[float]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d['active_policy_family'] = self.active_policy_family.value

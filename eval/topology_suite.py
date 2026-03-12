@@ -398,7 +398,13 @@ def run_episode(
         rd  = float(rd_sched[t])
         obs = [rd] + [0.0] * 15
         out = wrapper.step(obs)
-        mask = np.array(out.available_mask, dtype=np.int8)
+        # Positions 0–6 of available_mask encode per-family accessibility (A(f,t) > 0)
+        # This is set by M2MinimalPolicy.forward() — family_mask encoded at positions 0-6
+        full_mask = out.available_mask
+        if len(full_mask) >= NUM_STATES:
+            mask = np.array(full_mask[:NUM_STATES], dtype=np.int8)
+        else:
+            mask = np.ones(NUM_STATES, dtype=np.int8)  # fallback: all accessible
         z    = int(out.active_state)
 
         if perm is not None:

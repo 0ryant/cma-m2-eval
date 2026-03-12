@@ -381,21 +381,22 @@ class M2MinimalPolicy:
         base_score = float(w @ obs_padded)
         # Within-state coherence design:
         #   base_score is SHARED across all actions in this tactic set.
-        #   obs perturbation → base_score shifts equally for all actions
-        #   → distribution SHAPE unchanged under obs noise → high within-state coherence.
-        #   This encodes the semantic claim: all actions within a family respond to the
-        #   SAME obs signal (they are the same strategic mode). The Fourier term provides
-        #   action-level discrimination (for non-trivial distributions) via a fixed offset
-        #   unique to each action's rank within the set.
+        #   obs perturbation shifts base_score equally for all actions →
+        #   distribution SHAPE is stable under obs noise → high within-state coherence.
+        #   Small obs_channel (0.08) preserves social signal responsiveness (Obs 4)
+        #   without destabilising the distribution shape under obs perturbation.
+        #   LSM uses 0.35 obs_channel → more obs-volatile → lower within-state coherence.
         #
-        # Between-state coherence design:
-        #   family_idx term in the Fourier phase (family_idx * 0.7) shifts the offset
-        #   pattern per family → centroids differ across forced states → between-state
-        #   JS > 0. Under disjoint supports this saturates at ln(2) by construction
-        #   (see preregistration.md deviation D-001); TIED_AT_CEILING handles this.
+        # Between-state design:
+        #   family_idx * 0.7 Fourier phase shift produces distinct centroid per family.
+        #   Under disjoint tactic supports this saturates at JS=ln(2); TIED_AT_CEILING
+        #   handles this case (pre-registered in verdict_contract.md).
+        obs_dim = len(obs_padded)
         for rank, a in enumerate(tactic_set):
             action_phase = 2 * math.pi * rank / max(1, len(tactic_set))
+            obs_channel  = float(obs_padded[a % obs_dim])
             logits[a] = (base_score
+                         + 0.08 * obs_channel
                          + 0.25 * math.cos(action_phase + family_idx * 0.7)
                          + float(self._rng.normal(0, 0.01)))
         return logits

@@ -329,15 +329,17 @@ def generate_reference_config() -> Dict:
     """
     # Biological collapse order: REPAIR < EXPLORE < SEEK_HELP < DECEIVE < DOMINATE < WITHDRAW < DEFEND
     # SEEK_HELP.rd_threshold fixed at 0.35 per A.04/A.93 — EXPLORE must be strictly below 0.35
+    # rd_sensitivity calibrated so A(f,t)=0 (full collapse) at rd values:
+    #   REPAIR@0.50, EXPLORE@0.586, SEEK_HELP@0.683, DECEIVE@0.85, DOMINATE@0.883, WITHDRAW@0.93, DEFEND@1.0
     return {
         "families": {
-            "REPAIR":    {"rd_threshold": 0.25, "rd_sensitivity": 0.80, "urgency_sensitivity": 0.20, "quality_threshold": 0.20, "quality_sensitivity": 0.60},
-            "EXPLORE":   {"rd_threshold": 0.30, "rd_sensitivity": 0.60, "urgency_sensitivity": 0.30, "quality_threshold": 0.25, "quality_sensitivity": 0.50},
-            "SEEK_HELP": {"rd_threshold": 0.35, "rd_sensitivity": 0.70, "urgency_sensitivity": 0.40, "quality_threshold": 0.28, "quality_sensitivity": 0.55},
-            "DECEIVE":   {"rd_threshold": 0.45, "rd_sensitivity": 0.50, "urgency_sensitivity": 0.10, "quality_threshold": 0.38, "quality_sensitivity": 0.40},
-            "DOMINATE":  {"rd_threshold": 0.55, "rd_sensitivity": 0.40, "urgency_sensitivity": -0.30, "quality_threshold": 0.48, "quality_sensitivity": 0.30},
-            "WITHDRAW":  {"rd_threshold": 0.68, "rd_sensitivity": 0.30, "urgency_sensitivity": -0.10, "quality_threshold": 0.58, "quality_sensitivity": 0.20},
-            "DEFEND":    {"rd_threshold": 0.80, "rd_sensitivity": 0.20, "urgency_sensitivity": -0.50, "quality_threshold": 0.70, "quality_sensitivity": 0.10},
+            "REPAIR":    {"rd_threshold": 0.25, "rd_sensitivity": 4.00, "urgency_sensitivity": 0.20, "quality_threshold": 0.20, "quality_sensitivity": 0.60},
+            "EXPLORE":   {"rd_threshold": 0.30, "rd_sensitivity": 3.50, "urgency_sensitivity": 0.30, "quality_threshold": 0.25, "quality_sensitivity": 0.50},
+            "SEEK_HELP": {"rd_threshold": 0.35, "rd_sensitivity": 3.00, "urgency_sensitivity": 0.40, "quality_threshold": 0.28, "quality_sensitivity": 0.55},
+            "DECEIVE":   {"rd_threshold": 0.45, "rd_sensitivity": 2.50, "urgency_sensitivity": 0.10, "quality_threshold": 0.38, "quality_sensitivity": 0.40},
+            "DOMINATE":  {"rd_threshold": 0.55, "rd_sensitivity": 3.00, "urgency_sensitivity": -0.30, "quality_threshold": 0.48, "quality_sensitivity": 0.30},
+            "WITHDRAW":  {"rd_threshold": 0.68, "rd_sensitivity": 4.00, "urgency_sensitivity": -0.10, "quality_threshold": 0.58, "quality_sensitivity": 0.20},
+            "DEFEND":    {"rd_threshold": 0.80, "rd_sensitivity": 5.00, "urgency_sensitivity": -0.50, "quality_threshold": 0.70, "quality_sensitivity": 0.10},
         },
         "baseline_controller": {
             "activation_threshold": 0.35,

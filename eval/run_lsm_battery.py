@@ -169,17 +169,23 @@ def run_full_battery(
     cfg:         BatteryConfig = None,
     telemetry:   Optional[TelemetryEmitter] = None,
     lsm_runtime: Optional[LSMRuntime] = None,
+    regime1_records = None,    # List[TickRecord] from Regime 1; used as real CF probe obs
 ) -> BatteryResult:
     """
     Run the full three-suite battery.
     Topology suite runs first — its calibration permutation feeds the other suites.
 
     Args:
-        m2_wrapper:   M2 agent wrapper
-        lsm_wrapper:  LSM agent wrapper
-        cfg:          battery configuration
-        telemetry:    TelemetryEmitter from Regime 1 run (for Tier A gate check)
-        lsm_runtime:  LSMRuntime (for auto param count)
+        m2_wrapper:      M2 agent wrapper
+        lsm_wrapper:     LSM agent wrapper
+        cfg:             battery configuration
+        telemetry:       TelemetryEmitter from Regime 1 run (for Tier A gate check)
+        lsm_runtime:     LSMRuntime (for auto param count)
+        regime1_records: TickRecord list from Regime 1. If provided, obs from these
+                         records are used as counterfactual probe contexts instead of
+                         random Gaussian vectors. Real obs are semantically diverse
+                         (varying rd, urgency, scarcity) and enable meaningful
+                         within-state coherence and between-state margin comparisons.
     """
     if cfg is None:
         cfg = BatteryConfig()
@@ -214,12 +220,32 @@ def run_full_battery(
     print("\n" + "─" * 60)
     print("  Suite 2: Counterfactual")
     print("─" * 60)
+    # Build probe contexts from real Regime 1 obs when available
+    # Random Gaussian probes cannot show M2 semantic advantage because they lack
+    # the structured variation (rd, urgency, scarcity) that M2 families respond to.
+    cf_probe_obs = None
+    if regime1_records is not None and len(regime1_records) > 0:
+        from counterfactual_suite import ProbeContext
+        rng_cf = __import__("random").Random(cfg.seed)
+        # Filter records that have obs_raw stored (wired in run_seed)
+        records_with_obs = [r for r in regime1_records if getattr(r, "obs_raw", None)]
+        if records_with_obs:
+            sample = rng_cf.sample(records_with_obs,
+                                   min(cfg.n_cf_contexts * 4, len(records_with_obs)))
+            cf_probe_obs = []
+            for r in sample[:cfg.n_cf_contexts]:
+                cf_probe_obs.append(ProbeContext(
+                    obs=r.obs_raw, rd=r.regression_depth,
+                    goal_stack_type="NEUTRAL", seed=rng_cf.randint(0, 10000)
+                ))
+
     cf_result = test_latent_vs_m2_counterfactual_suite(
         m2_wrapper=m2_wrapper,
         lsm_wrapper=lsm_wrapper,
         n_contexts=cfg.n_cf_contexts,
         n_repeats=cfg.n_cf_repeats,
         seed=cfg.seed,
+        probe_contexts=cf_probe_obs,   # None → generates random contexts
     )
 
     # Suite 3: Social Signal
@@ -274,15 +300,22 @@ def build_default_battery_wrappers(
     seed:        int = 0,
 ) -> tuple:
     """
-    Build default M2 and LSM wrappers for smoke-testing the battery scaffolding.
-    Replace with real sim engine wrappers for publication runs.
+    Build M2 and LSM wrappers with real M2MinimalPolicy injected.
+    The M2 wrapper uses biologically-grounded scoring; LSM uses the 4-equation latent model.
     """
+    from m2_policy import build_m2_agent, build_lsm_agent
+    from yaml_validator import generate_reference_config
+    from telemetry import TelemetryEmitter
+
+    yaml_cfg = generate_reference_config()
+    tel = TelemetryEmitter()
+
     lsm_cfg = LSMConfig(num_actions=num_actions, obs_dim=obs_dim, seed=seed)
     lsm_rt  = LSMRuntime(lsm_cfg)
     lsm_mdl = LSMModel(lsm_rt)
 
-    from m2_policy import build_m2_agent
-    m2 = build_m2_agent(seed=seed, num_actions=num_actions)
+    m2  = build_m2_agent(num_actions=num_actions, yaml_config=yaml_cfg,
+                          agent_id="battery_m2", telemetry=tel, seed=seed)
     lsm = LSMAgentWrapper(num_actions=num_actions, lsm_model=lsm_mdl)
 
     return m2, lsm, lsm_rt

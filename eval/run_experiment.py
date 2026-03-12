@@ -116,11 +116,11 @@ class MetricStatus:
 
     def icon(self) -> str:
         return {
-            PASS:                  "✓ PASS",
-            FAIL:                  "✗ FAIL",
+            PASS:                 "✓ PASS",
+            FAIL:                 "✗ FAIL",
             BLOCKED_BY_REGIME_LEN: "— BLOCKED (regime length)",
-            NOT_TRIGGERED:         "○ NOT TRIGGERED",
-            INVALIDATED_BY_BUG:    "⚠ INVALIDATED (bug)",
+            NOT_TRIGGERED:        "○ NOT TRIGGERED",
+            INVALIDATED_BY_BUG:   "⚠ INVALIDATED (bug)",
         }.get(self.status, self.status)
 
     def row(self) -> str:
@@ -245,7 +245,7 @@ def compute_verdict(
     if regime1 and regime1.observables:
         obs2b_val = mean("post_switch_degradation")
     # If no switches, degradation is undefined — NOT_TRIGGERED regardless of value
-    if m_obs2a.status == NOT_TRIGGERED or (obs2b_val == 0.0 and obs2a_val == 0.0):
+    if m_obs2a.status == NOT_TRIGGERED or obs2b_val == 0.0 and obs2a_val == 0.0:
         m_obs2b = MetricStatus("Obs 2b — Post-switch degradation", obs2b_val, "≤ −0.10",
                                NOT_TRIGGERED, note="no switches to measure degradation against")
     else:
@@ -345,6 +345,8 @@ def compute_verdict(
 
     # FMB Dim 4 — Cross-agent contagion (requires failure events + stress)
     fmb4_val = fmb.dim4.pearson_r_m2 if fmb else None
+    # Dim 4 measures M2 r < 0.30 (low contagion = good). We report the individuality
+    # advantage = flat_r - m2_r; target ≥ +0.10.
     fmb4_adv = (fmb.dim4.pearson_r_flat - fmb.dim4.pearson_r_m2) if fmb else None
     if no_failures and quick:
         m_fmb4 = MetricStatus("FMB Dim 4 — Contagion individuality", fmb4_adv,
@@ -368,6 +370,7 @@ def compute_verdict(
     obs1_pass    = m_obs1.status  == PASS
     obs3_pass    = m_obs3.status  == PASS
     obs5_pass    = m_obs5.status  == PASS
+    # any_signal: at least one non-blocked metric passed
     any_signal   = any(m.status == PASS for m in metrics)
 
     # First-match downgrade tree
@@ -395,6 +398,7 @@ def compute_verdict(
         action = "Return to Phase 1. Check YAML config, re-run ablations, validate observable targets."
         notes.append("No publishable claim yet. Do not submit.")
 
+    # Quick mode: no downgrade from stress-blocked metrics
     if quick:
         notes.append(
             "INTEGRITY MODE RUN — stress/collapse metrics are BLOCKED_BY_REGIME_LENGTH. "
@@ -402,7 +406,7 @@ def compute_verdict(
         )
     if regime1 and regime1.gate_passed is None:
         notes.append("Cold-start gate BLOCKED (run too short — ticks < 150). Not a failure.")
-    elif not regime1 or not regime1.gate_passed:
+    elif not regime1 or regime1.gate_passed is False:
         notes.append("Cold-start gate not passed — Regime 2 is blocked.")
 
     return ExperimentVerdict(
@@ -459,17 +463,20 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
             num_seeds=cfg.num_seeds,
         )
         flat_result = run_flat_ua(flat_cfg)
+        # Run flat agent to collect records for FMB comparison
         flat_agent = FlatUAWrapper(num_actions=cfg.num_actions, agent_id="flat_ua_0")
         rng = random.Random(0)
         for _ in range(min(50, cfg.ticks_per_episode)):
             obs = [rng.uniform(0, 0.4)] + [rng.gauss(0, 0.5) for _ in range(cfg.obs_dim - 1)]
             flat_agent.step(obs)
+        # Records already in flat_result implicitly — FMB will use sparse set
 
     # ── Stage 2: Regime 1 arc ────────────────────────────────
     regime1_result = None
     if cfg.run_regime1:
         print(f"\n▶ Stage 2: Regime 1 PEACETIME Arc (P3.1)  [{cfg.num_agents} agents, {cfg.num_seeds} seeds]")
         tel = TelemetryEmitter()
+        # obs_dim must match SimEnv._build_obs() — 16 dims
         obs_dim = 16
         agents = [
             build_m2_agent(
@@ -489,9 +496,10 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         )
         regime1_result = run_regime1(agents, r1_cfg)
 
+        # Persist records
         records_path = out_dir / "regime1_records.jsonl"
         with open(records_path, "w") as f:
-            for r in regime1_result.all_records[:5000]:
+            for r in regime1_result.all_records[:5000]:   # cap for storage
                 f.write(json.dumps(r.to_dict()) + "\n")
         print(f"  Records saved: {records_path} ({len(regime1_result.all_records):,} total)")
 
@@ -502,8 +510,9 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         m2_bat, lsm_bat, lsm_rt = build_default_battery_wrappers(
             num_actions=cfg.num_actions, obs_dim=cfg.obs_dim * 4,
         )
-        m2_param_count  = m2_bat.policy_layer.param_count() if hasattr(m2_bat, 'policy_layer') and hasattr(m2_bat.policy_layer, 'param_count') else 0
-        lsm_param_count = lsm_rt.param_count() if lsm_rt else 0
+        # Compute real param counts for complexity matching gate (P2.2)
+        m2_param_count  = int(m2_bat.policy_layer._W.size) if hasattr(m2_bat, 'policy_layer') and hasattr(m2_bat.policy_layer, '_W') else 0
+        lsm_param_count = int(lsm_rt.cfg.num_latent_states * lsm_rt.cfg.obs_dim + lsm_rt.cfg.num_latent_states) if lsm_rt else 0
 
         bat_cfg = BatteryConfig(
             num_actions=cfg.num_actions,
@@ -518,16 +527,17 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         tel_bat = regime1_result.telemetry if regime1_result else TelemetryEmitter()
         r1_records = regime1_result.all_records if regime1_result else None
         battery_result = run_full_battery(m2_bat, lsm_bat, cfg=bat_cfg,
-                                          telemetry=tel_bat, lsm_runtime=lsm_rt)
+                                          telemetry=tel_bat, lsm_runtime=lsm_rt,
+                                          regime1_records=r1_records)
 
         bat_path = out_dir / "battery_result.json"
         with open(bat_path, "w") as f:
             json.dump({
-                "topology_win":       battery_result.topology_win,
+                "topology_win":     battery_result.topology_win,
                 "counterfactual_win": battery_result.counterfactual_win,
-                "social_signal_win":  battery_result.social_signal_win,
-                "battery_win":        battery_result.battery_win,
-                "tier_a_gate":        battery_result.tier_a_gate,
+                "social_signal_win": battery_result.social_signal_win,
+                "battery_win":      battery_result.battery_win,
+                "tier_a_gate":      battery_result.tier_a_gate,
             }, f, indent=2)
         print(f"  Battery result saved: {bat_path}")
 
@@ -535,6 +545,7 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
     fmb_result = None
     if cfg.run_fmb and regime1_result:
         print("\n▶ Stage 4: FMB Suite — 4 dimensions (P4.1)")
+        # Build flat records for comparison (stub: reuse subset of regime1 with tactic_class overridden)
         flat_records_fmb = []
         for r in regime1_result.all_records[:500]:
             import copy
@@ -558,16 +569,16 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         fmb_path = out_dir / "fmb_result.json"
         with open(fmb_path, "w") as f:
             json.dump({
-                "dim1_pass":             fmb_result.dim1.passes_threshold,
-                "dim2_pass":             fmb_result.dim2.passes_threshold,
-                "dim3_pass":             fmb_result.dim3.passes_threshold,
-                "dim4_pass":             fmb_result.dim4.passes_threshold,
-                "dims_passed":           fmb_result.dims_passed,
-                "fmb_paper_ready":       fmb_result.fmb_paper_ready,
-                "dim1_kl":               fmb_result.dim1.kl_vs_uniform,
-                "dim2_delay_advantage":  fmb_result.dim2.delay_advantage,
+                "dim1_pass": fmb_result.dim1.passes_threshold,
+                "dim2_pass": fmb_result.dim2.passes_threshold,
+                "dim3_pass": fmb_result.dim3.passes_threshold,
+                "dim4_pass": fmb_result.dim4.passes_threshold,
+                "dims_passed": fmb_result.dims_passed,
+                "fmb_paper_ready": fmb_result.fmb_paper_ready,
+                "dim1_kl": fmb_result.dim1.kl_vs_uniform,
+                "dim2_delay_advantage": fmb_result.dim2.delay_advantage,
                 "dim3_recovery_rate_m2": fmb_result.dim3.recovery_rate_m2,
-                "dim4_pearson_r_m2":     fmb_result.dim4.pearson_r_m2,
+                "dim4_pearson_r_m2": fmb_result.dim4.pearson_r_m2,
             }, f, indent=2)
         print(f"  FMB result saved: {fmb_path}")
 
@@ -576,7 +587,7 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
         print("\n▶ Stage 5: M1 Ablation Suite (P1.3)")
         ablation_result = run_ablation_suite(
             m2_baseline_records=regime1_result.all_records,
-            ablated_records_by_target={},
+            ablated_records_by_target={},   # wire real ablated runs here
         )
 
     # ── Stage 6: Model selection (optional) ──────────────────
@@ -599,7 +610,7 @@ def run_experiment(cfg: ExperimentConfig, yaml_config: dict) -> ExperimentVerdic
                 f.write(f"- Seed {snap.seed}: CV={snap.cv_tactic_class:.4f}  "
                         f"Spearman={snap.spearman_collapse_rho:.4f}  "
                         f"PearsonR={snap.pearson_r_char_stability:.4f}  "
-                        f"Gate={'PASS' if snap.cold_start_gate_passed is True else ('BLOCKED' if snap.cold_start_gate_passed is None else 'FAIL')}\n")
+                        f"Gate={'PASS' if snap.cold_start_gate_passed else 'FAIL'}\n")
     print(f"\n  Verdict saved: {verdict_path}")
     return verdict
 
@@ -622,6 +633,7 @@ if __name__ == "__main__":
     parser.add_argument("--output",  default="results", help="Output directory")
     args = parser.parse_args()
 
+    # Load config
     yaml_config = None
     if args.config:
         p = Path(args.config)
@@ -639,6 +651,7 @@ if __name__ == "__main__":
         ok = run_preflight(yaml_config)
         sys.exit(0 if ok else 1)
 
+    # Experiment config
     cfg = ExperimentConfig(output_dir=args.output)
     if args.quick:
         cfg.num_agents          = 4
@@ -655,7 +668,7 @@ if __name__ == "__main__":
         cfg.num_seeds = args.seeds
     if args.fmb_only:
         cfg.run_battery = False
-    cfg.run_ablation       = False
+    cfg.run_ablation      = False  # enable explicitly for publication run
     cfg.run_model_selection = False
 
     run_experiment(cfg, yaml_config)

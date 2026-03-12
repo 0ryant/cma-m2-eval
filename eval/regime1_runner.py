@@ -123,7 +123,7 @@ class ObservableSnapshot:
     pearson_r_char_stability: float = 0.0
 
     # Supplementary
-    cold_start_gate_passed:  Optional[bool] = None  # True=pass, False=fail, None=blocked
+    cold_start_gate_passed:  bool  = False
     mean_world_model_error_at_150: float = 1.0
     precedence_strong_fraction: float = 0.0
     depressive_lock_in_events:  int   = 0
@@ -201,64 +201,132 @@ def run_seed(
     buf:     StratifiedReplayBuffer,
     gate:    ColdStartDecayGate,
     rng:     random.Random,
-) -> Tuple[List[TickRecord], Optional[bool]]:
+    env=None,   # SimEnv instance; created here if None
+) -> Tuple[List[TickRecord], bool]:
     """
-    Run all agents for one seed. Returns (all_records, gate_result).
-    gate_result: True=pass, False=fail, None=blocked (run too short).
+    Run all agents for one seed against real SimEnv. Returns (all_records, gate_passed).
     """
-    rd_sched = build_peacetime_schedule(cfg, seed)
-    all_records: List[TickRecord] = []
-    world_model_error = 0.90   # cold-start value, decays per tick
+    from sim_env import SimEnv, EnvConfig
 
+    all_records: List[TickRecord] = []
+
+    # Build env from cfg dimensions if not provided
+    if env is None:
+        env_cfg = EnvConfig(
+            n_agents=len(agents),
+            obs_dim=cfg.obs_dim,
+            ticks_per_episode=cfg.ticks_per_episode,
+            seed=seed,
+        )
+        env = SimEnv(env_cfg, seed=seed)
+
+    obs_dict = env.reset(seed=seed)
     for agent in agents:
         agent.reset(seed)
 
-    for t in range(cfg.ticks_per_episode):
-        rd  = float(rd_sched[t])
-        regime_label = Regime.PEACETIME if rd < 0.50 else Regime.STRESS
-        world_model_error = max(0.02, world_model_error - cfg.wm_error_decay_rate)
+    # Map agent wrapper order to env agent IDs
+    agent_ids = [getattr(a, 'agent_id', f'agent_{i}') for i, a in enumerate(agents)]
 
-        for agent in agents:
-            obs = [rd] + [rng.gauss(0, 0.5) for _ in range(cfg.obs_dim - 1)]
+    for t in range(cfg.ticks_per_episode):
+        tick_info = env.tick_info()
+        pop_wm_error = env.population_mean_wm_error()
+        pop_rd       = env.population_mean_rd()
+        regime_label = Regime.PEACETIME if pop_rd < 0.50 else Regime.STRESS
+
+        action_dict: dict = {}
+        tick_records: List[TickRecord] = []
+
+        for i, agent in enumerate(agents):
+            aid = agent_ids[i]
+            obs = obs_dict.get(aid, [0.0] * cfg.obs_dim)
             out = agent.step(obs)
 
-            # Derive accessible families list
+            # Real env metrics from SimEnv
+            info = tick_info.get(aid, {})
+            rd   = info.get("rd",   obs[0] if obs else 0.0)
+            nc   = info.get("narrative_coherence", 1.0)
+            wme  = info.get("world_model_error", pop_wm_error)
+            pgv  = info.get("primary_goal_valence", 0.0)
+
+            # Map action index → tactic family name for env.step()
             family_val = list(M2Family)[out.active_state % 7] if out.active_state < 7 else M2Family.BASELINE
-            accessible = [family_val]  # real engine: from policy layer accessible_families
+            action_name = family_val.value if family_val != M2Family.BASELINE else "BASELINE"
+            action_dict[aid] = action_name
+
+            # Policy score vector from M2MinimalPolicy explanation trace
+            policy_scores = [0.0] * 7
+            if hasattr(agent, 'policy_layer') and hasattr(agent.policy_layer, 'explanation_trace'):
+                trace = agent.policy_layer.explanation_trace()
+                if trace:
+                    last = trace[-1]
+                    family_order = ["DEFEND","WITHDRAW","REPAIR","EXPLORE","DOMINATE","SEEK_HELP","DECEIVE"]
+                    for fi, fname in enumerate(family_order):
+                        policy_scores[fi] = last.policy_scores.get(fname, 0.0)
+
+            # Accessible families from policy
+            accessible = [family_val]
+            if hasattr(agent, 'policy_layer') and hasattr(agent.policy_layer, 'explanation_trace'):
+                trace = agent.policy_layer.explanation_trace()
+                if trace:
+                    last = trace[-1]
+                    accessible = [
+                        M2Family[fname] if fname in M2Family.__members__ else M2Family.BASELINE
+                        for fname in last.accessible_families
+                    ] or [family_val]
+
+            # Switch detection from policy trace
+            switch_paid = False
+            switch_mag  = 0.0
+            if hasattr(agent, 'policy_layer') and hasattr(agent.policy_layer, 'explanation_trace'):
+                trace = agent.policy_layer.explanation_trace()
+                if trace:
+                    last = trace[-1]
+                    switch_paid = last.switch_occurred
+                    switch_mag  = last.switch_cost_paid
 
             record = TickRecord(
                 tick=t,
-                agent_id=getattr(agent, 'agent_id', f'agent_{id(agent)}'),
+                agent_id=aid,
                 regime=regime_label,
                 seed=seed,
                 active_policy_family=family_val,
-                policy_score_vector=[0.0] * 7,   # real engine: from policy layer
-                switch_cost_paid=False,
-                switch_cost_magnitude=0.0,
+                policy_score_vector=policy_scores,
+                switch_cost_paid=switch_paid,
+                switch_cost_magnitude=switch_mag,
                 accessible_families=accessible,
                 active_overlays=[],
                 policy_conflict_detected=False,
                 tactic_class=out.tactic_class,
                 action_taken=out.action_taken,
-                precedence_tag=PrecedenceTag.SCORE_WIN,
-                dominant_module="M2_policy",
+                precedence_tag=out._precedence_tag if hasattr(out, '_precedence_tag') else PrecedenceTag.SCORE_WIN,
+                dominant_module=out._dominant_module if hasattr(out, '_dominant_module') else "M2_policy",
                 regression_depth=rd,
-                baseline_ticks_running=0,
-                mourn_during_baseline_ticks=0,
-                narrative_coherence=max(0.0, 1.0 - rd * 0.5),   # proxy
-                world_model_error=world_model_error,
-                primary_goal_valence=0.0,
+                baseline_ticks_running=agent._baseline_ticks if hasattr(agent, '_baseline_ticks') else 0,
+                mourn_during_baseline_ticks=agent._mourn_ticks_in_baseline if hasattr(agent, '_mourn_ticks_in_baseline') else 0,
+                narrative_coherence=nc,
+                world_model_error=wme,
+                primary_goal_valence=pgv,
+                obs_raw=obs,   # stored for CF probe contexts in LSM battery (P2.4)
             )
             tel.tick(record)
-            all_records.append(record)
+            tick_records.append(record)
 
             # Replay buffer
-            state_vec  = [rd] + [0.0] * 3
-            next_state = [max(0, rd - 0.01)] + [0.0] * 3
-            buf.add(Transition(state_vec, out.action_taken, next_state, regime_label, t, record.agent_id))
+            rd_next = max(0.0, rd - 0.01)
+            buf.add(Transition([rd, nc, wme, pgv], out.action_taken,
+                               [rd_next, nc, max(0.02, wme - 0.005), pgv],
+                               regime_label, t, aid))
 
-        # Cold-start gate tracking
-        gate.record(t, world_model_error)
+        all_records.extend(tick_records)
+
+        # Advance env one tick
+        obs_dict, done = env.step(action_dict)
+
+        # Cold-start gate: track population mean world model error
+        gate.record(t, pop_wm_error)
+
+        if done:
+            break
 
     # Check gate
     gate_passed, gate_msg = gate.check_regime_1_gate()
@@ -267,8 +335,6 @@ def run_seed(
         print(f"  Seed {seed} cold-start gate: BLOCKED — {gate_msg}")
     else:
         print(f"  Seed {seed} cold-start gate: {'PASS' if gate_passed else 'FAIL'} — {gate_msg}")
-    # Treat structurally impossible gate as None (blocked), not False (failed)
-    # None propagates through Regime1Result and does not block Regime 2
     gate_result = None if gate_blocked else gate_passed
     return all_records, gate_result
 
@@ -282,8 +348,8 @@ class Regime1Result:
     observables:        List[ObservableSnapshot]
     all_records:        List[TickRecord]
     telemetry:          TelemetryEmitter
-    gate_passed:        Optional[bool]  # True=all pass, False=any fail, None=blocked
-    regime2_unblocked:  bool           # True only if gate_passed is True
+    gate_passed:        Optional[bool]  # True=all pass, False=any fail, None=blocked (run too short)
+    regime2_unblocked:  bool            # True only if gate_passed is True
 
     def summary(self) -> str:
         lines = ["\n══ Regime 1 PEACETIME Arc ══════════════════════════════"]
@@ -319,13 +385,15 @@ def run_regime1(
     seed_base:  int = 0,
 ) -> Regime1Result:
     """
-    Full Regime 1 PEACETIME arc.
+    Full Regime 1 PEACETIME arc against real SimEnv.
 
     Args:
         m2_agents:  list of M2AgentWrapper instances (≥ 32 for publication)
         cfg:        Regime1Config
         seed_base:  starting seed (seeds = seed_base, seed_base+1, ...)
     """
+    from sim_env import SimEnv, EnvConfig
+
     if cfg is None:
         cfg = Regime1Config()
 
@@ -336,21 +404,28 @@ def run_regime1(
 
     all_records:    List[TickRecord]        = []
     snapshots:      List[ObservableSnapshot] = []
-    episode_groups: Dict[int, List[List[TickRecord]]] = {}   # seed → per-agent episodes
-    any_gate_failed  = False
-    any_gate_blocked = False
+    all_gates_pass  = True
 
     for seed_offset in range(cfg.num_seeds):
         seed = seed_base + seed_offset
         print(f"\n── Regime 1 seed {seed} ─────────────────────────────")
-        records, gate_ok = run_seed(m2_agents, cfg, seed, tel, buf, gate, rng)
+
+        # Build fresh env for each seed
+        env_cfg = EnvConfig(
+            n_agents=len(m2_agents),
+            obs_dim=cfg.obs_dim,
+            ticks_per_episode=cfg.ticks_per_episode,
+            seed=seed,
+        )
+        env = SimEnv(env_cfg, seed=seed)
+
+        records, gate_ok = run_seed(m2_agents, cfg, seed, tel, buf, gate, rng, env=env)
         all_records.extend(records)
         if gate_ok is False:
-            any_gate_failed = True
+            all_gates_pass = False
             print(f"  ⚠  Gate failed for seed {seed}. Calling double_peacetime_fraction().")
             buf.double_peacetime_fraction()
         elif gate_ok is None:
-            any_gate_blocked = True
             print(f"  ⚠  Gate blocked for seed {seed} (run too short). Not a failure.")
 
         # Build per-agent episode lists for character stability
@@ -360,8 +435,11 @@ def run_regime1(
         all_agent_episodes = list(by_agent.values())
 
         # Compute observables
-        prec_frac = tel.precedence_fraction()
-        lock_ins  = sum(1 for e in tel.event_log if hasattr(e, 'event_type') and getattr(e, 'event_type', '') == 'DEPRESSIVE_LOCK_IN')
+        # Agents emit PRECEDENCE_TAG events to their shared tel (injected at build time).
+        # The local tel collects tick records only. Pull precedence from agents shared tel.
+        agent_tel = next((getattr(a, 'tel', None) for a in m2_agents if getattr(a, 'tel', None) is not None), tel)
+        prec_frac = agent_tel.precedence_fraction()
+        lock_ins  = sum(1 for e in agent_tel.event_log if hasattr(e, 'event_type') and getattr(e, 'event_type', '') == 'DEPRESSIVE_LOCK_IN')
 
         snap = ObservableSnapshot(
             seed=seed,
@@ -379,20 +457,27 @@ def run_regime1(
         print(f"  CV(tactic): {snap.cv_tactic_class:.4f}  Spearman: {snap.spearman_collapse_rho:.4f}  "
               f"Pearson r: {snap.pearson_r_char_stability:.4f}")
 
-    # Derive three-state gate: True (all pass), False (any fail), None (all blocked, none failed)
-    if any_gate_failed:
-        gate_result = False
-    elif any_gate_blocked:
-        gate_result = None
+    # Use agents shared telemetry (has PRECEDENCE_TAG events) for Tier A gate
+    agent_tel = next((getattr(a, 'tel', None) for a in m2_agents if getattr(a, 'tel', None) is not None), tel)
+
+    # Determine aggregate gate state:
+    # all True → all_gates_pass=True, regime2_unblocked=True
+    # any False → all_gates_pass=False, regime2_unblocked=False
+    # all None (blocked) → gate_passed=None, regime2_unblocked=False
+    gate_states = [snap.cold_start_gate_passed for snap in snapshots]
+    if all(g is None for g in gate_states):
+        final_gate = None
+    elif all(g is True for g in gate_states if g is not None):
+        final_gate = all_gates_pass  # True unless any False
     else:
-        gate_result = True
+        final_gate = False
 
     result = Regime1Result(
         observables=snapshots,
         all_records=all_records,
-        telemetry=tel,
-        gate_passed=gate_result,
-        regime2_unblocked=gate_result is True,
+        telemetry=agent_tel,
+        gate_passed=final_gate,
+        regime2_unblocked=final_gate is True,
     )
     print(result.summary())
     return result
