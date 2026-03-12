@@ -1,0 +1,11 @@
+m2_config.yaml
+*_config.yaml
+fmb_result.json
+battery_result.json
+observables.json
+results/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.env
