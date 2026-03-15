@@ -69,8 +69,6 @@ def title_page(pdf):
 
     ax.text(0.5, 0.16, "Registered before publication run  •  Verdict contract frozen 2026-03-11",
             fontsize=9, ha="center", color="#95a5a6")
-    ax.text(0.5, 0.13, "Paper submitted to WOA 2026 (27th Workshop \"From Objects to Agents\")",
-            fontsize=9, ha="center", color="#95a5a6")
 
     pdf.savefig(fig)
     plt.close(fig)
