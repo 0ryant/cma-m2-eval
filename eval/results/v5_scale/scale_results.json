@@ -1,0 +1,29 @@
+[
+  {
+    "n_agents": 32,
+    "downgrade": "FULL_TIER_A",
+    "obs3": 0.880139957950083,
+    "obs5": 0.9053909656753488,
+    "social": 0.0,
+    "battery_win": true,
+    "tier_a": true
+  },
+  {
+    "n_agents": 64,
+    "downgrade": "DOWNGRADE_3_WITH_SIGNAL",
+    "obs3": 0.8480729387410468,
+    "obs5": 0.8805411252909559,
+    "social": 0.0,
+    "battery_win": true,
+    "tier_a": true
+  },
+  {
+    "n_agents": 128,
+    "downgrade": "DOWNGRADE_3_WITH_SIGNAL",
+    "obs3": 0.8421828733502018,
+    "obs5": 0.8782381238863458,
+    "social": 0.0,
+    "battery_win": true,
+    "tier_a": true
+  }
+]

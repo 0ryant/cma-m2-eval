@@ -1,0 +1,14 @@
+{
+  "topology_win": true,
+  "counterfactual_win": true,
+  "social_signal_win": false,
+  "battery_win": true,
+  "tier_a_gate": {
+    "override": 0.0,
+    "score_win": 0.9957725694444445,
+    "weighted_arb": 0.0042274305555555555,
+    "total": 345600,
+    "strong_fraction": 0.9957725694444445,
+    "tier_a_gate_pass": true
+  }
+}

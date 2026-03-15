@@ -1,0 +1,12 @@
+{
+  "dim1_pass": false,
+  "dim2_pass": true,
+  "dim3_pass": false,
+  "dim4_pass": false,
+  "dims_passed": 1,
+  "fmb_paper_ready": false,
+  "dim1_kl": 0.0,
+  "dim2_delay_advantage": 1000.0,
+  "dim3_recovery_rate_m2": 1.0,
+  "dim4_pearson_r_m2": 0.0
+}

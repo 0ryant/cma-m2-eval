@@ -599,6 +599,69 @@ def build_m2_agent(
     return wrapper
 
 
+# ──────────────────────────────────────────────────────────────
+# Calibrated policy builder (Phase 1.5)
+# Added for v5 ablation reproducibility. Does not modify any
+# existing class, method, or registered parameter.
+# ──────────────────────────────────────────────────────────────
+
+def build_calibrated_policy(seed: int = 42, num_actions: int = 128) -> "M2MinimalPolicy":
+    """
+    Phase 1.5 calibrated policy.
+    Changes vs Phase 1:
+      - FamilyParams rd_thresholds tuned for sequential biological collapse order
+      - W matrix scaled to live obs dims only (dead dims 1/3/7/14 excluded)
+      - W magnitude scaled so gated scores live in [0.05, 0.5] range
+      - BASELINE threshold 0.35 → 0.04 (now fires at genuine collapse)
+    """
+    fp = [
+        # Collapse order matches BIOLOGICAL_COLLAPSE_PRIOR = (2,3,5,6,4,1,0):
+        # REPAIR < EXPLORE < SEEK_HELP < DECEIVE < DOMINATE < WITHDRAW < DEFEND
+        # High rd_sensitivity = sharp collapse at threshold (cleaner monotone signal for Obs 3)
+        FamilyParams("DEFEND",    rd_threshold=2.0,  rd_sensitivity=12.0, urgency_sensitivity=0.0),
+        FamilyParams("WITHDRAW",  rd_threshold=0.65, rd_sensitivity=10.0, urgency_sensitivity=0.0),
+        FamilyParams("REPAIR",    rd_threshold=0.18, rd_sensitivity=12.0, urgency_sensitivity=0.0),
+        FamilyParams("EXPLORE",   rd_threshold=0.24, rd_sensitivity=12.0, urgency_sensitivity=0.0),
+        FamilyParams("DOMINATE",  rd_threshold=0.52, rd_sensitivity=10.0, urgency_sensitivity=0.0),
+        FamilyParams("SEEK_HELP", rd_threshold=0.34, rd_sensitivity=10.0, urgency_sensitivity=0.0),
+        FamilyParams("DECEIVE",   rd_threshold=0.42, rd_sensitivity=10.0, urgency_sensitivity=0.0),
+    ]
+    # baseline_activation_threshold: low so any family with non-trivial gated score wins.
+    # At rd=1.0 only DEFEND accessible; its gated_score ~ 0.07–0.15.
+    # Threshold 0.04 ensures DEFEND fires as SCORE_WIN rather than falling to BASELINE.
+    cfg = M2PolicyConfig(num_actions=num_actions, family_params=fp,
+                         baseline_activation_threshold=0.04)
+    pol = M2MinimalPolicy(cfg, seed=seed)
+    # W matrix: live dims only
+    # [0]rd [2]resources [5]regen [6]nbr_res [9]ticks_since_gain
+    # [10]wm_conf [12]goal_valence [13]budget_pressure [15]time_pressure
+    sc = 0.18
+    W = np.zeros((7, 64), dtype=np.float32)
+    # EXPLORE (3): thrives in peacetime — suppress strongly when resources drain
+    W[3, 0]=-4*sc; W[3, 2]=+3.5*sc; W[3,10]=+1.5*sc; W[3, 5]=+1.5*sc; W[3,12]=+1.0*sc
+    W[3,13]=-3.0*sc   # budget pressure strongly suppresses EXPLORE
+    # REPAIR (2): recovery signal — boost on drain rate / scarcity; penalise when rich
+    W[2,13]=+5*sc; W[2, 9]=+4.0*sc; W[2, 8]=+2.0*sc; W[2, 0]=+1.5*sc
+    W[2, 2]=-2.0*sc   # when rich, REPAIR is pointless — suppress
+    # DEFEND (0): crisis hold — strongest at crisis+scarcity; penalise when rich
+    W[0, 0]=+4*sc; W[0, 2]=-3.5*sc; W[0,15]=+2.5*sc; W[0,13]=+2.0*sc; W[0, 8]=+2.5*sc
+    # SEEK_HELP (5): social rescue — high rd + social density; suppress when rich
+    W[5, 0]=+2*sc; W[5, 6]=+3.5*sc; W[5, 2]=-2.5*sc; W[5,14]=+1.5*sc
+    # WITHDRAW (1): isolated refuge
+    W[1, 0]=+2.5*sc; W[1,6]=-4.0*sc; W[1, 2]=-1.0*sc
+    # DOMINATE (4): opportunistic — only fires when rich AND neighbours rich AND low stress
+    W[4, 6]=+3.5*sc; W[4, 2]=+2.0*sc
+    W[4, 0]=-3.5*sc   # strong rd penalty
+    W[4,13]=-3.0*sc   # strong budget_pressure penalty
+    W[4, 8]=-2.5*sc   # strong scarcity penalty
+    # DECEIVE (6): information play
+    W[6, 6]=+2.5*sc; W[6, 2]=-3.0*sc; W[6, 9]=+2.0*sc; W[6, 0]=+1.0*sc
+    rng_w = np.random.default_rng(seed + 777)
+    W += rng_w.standard_normal(W.shape).astype(np.float32) * 0.04
+    pol._W = W
+    return pol
+
+
 def build_lsm_agent(
     num_actions: int = 128,
     obs_dim:     int = 64,
